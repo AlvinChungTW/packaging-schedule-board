@@ -1,0 +1,10 @@
+{
+  "name": "packaging-schedule-board",
+  "version": "1.0.0",
+  "description": "包裝備料排程工具：Google 試算表 + Apps Script 的排隊制包裝排程與備料提醒",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}
