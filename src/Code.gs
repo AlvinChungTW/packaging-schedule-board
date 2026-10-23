@@ -345,6 +345,34 @@ function nextSeq(orders) {
   return Math.floor(max) + 1;
 }
 
+/**
+ * 包裝隊伍的先後：「包裝中」一律排最前面（不論包裝順序填多少），
+ * 其餘依包裝順序由小到大，同順序依列號。
+ */
+function compareQueue(a, b) {
+  var pa = a.status === STATUS.PACKING ? 0 : 1;
+  var pb = b.status === STATUS.PACKING ? 0 : 1;
+  if (pa !== pb) return pa - pb;
+  if (a.seq !== b.seq) {
+    if (a.seq == null) return -1;
+    if (b.seq == null) return 1;
+    return a.seq - b.seq;
+  }
+  return a.row - b.row;
+}
+
+/** 在包裝隊伍中的工單：未完成，且有包裝順序或正在包裝 */
+function isQueued(o) {
+  return o.status !== STATUS.DONE && (o.seq != null || o.status === STATUS.PACKING);
+}
+
+/** 重新編號：隊伍先後不變，包裝順序改成 1、2、3… */
+function planRenumber(orders) {
+  return orders.filter(isQueued).sort(compareQueue).map(function (o, i) {
+    return { row: o.row, seq: i + 1 };
+  });
+}
+
 /** 開頭是 = + - @ 的文字，加上 ' 避免被試算表當成公式 */
 function safeText(s) {
   return /^[=+\-@]/.test(s) ? "'" + s : s;
@@ -477,13 +505,12 @@ function computeAll(input) {
     return r;
   });
 
-  // 排隊：依包裝順序，前一張結束後才能開始
+  // 排隊：包裝中的排最前面，其餘依包裝順序，前一張結束後才能開始
   var queue = results.filter(function (r) {
-    var o = r.src;
-    if (o.status === STATUS.DONE || o.seq == null) return false;
-    if (!(o.hours > 0)) { r.error = LIGHT.MISSING_HOURS; return false; }
+    if (!isQueued(r.src)) return false;
+    if (!(r.src.hours > 0)) { r.error = LIGHT.MISSING_HOURS; return false; }
     return true;
-  }).sort(function (a, b) { return a.src.seq - b.src.seq || a.src.row - b.src.row; });
+  }).sort(function (a, b) { return compareQueue(a.src, b.src); });
 
   var prevLast = -1;
   queue.forEach(function (r) {
@@ -546,7 +573,7 @@ function lightOf(r, nowPrepIdx, yellowAhead, duplicated) {
   if (o.status === STATUS.DONE) return LIGHT.FINISHED;
   if (duplicated) return LIGHT.DUPLICATE;
   if (r.error) return r.error;
-  if (o.seq == null) return LIGHT.UNQUEUED;
+  if (!isQueued(o)) return LIGHT.UNQUEUED;
   if (o.prepped) return LIGHT.PREPPED;
   if (r.deadlineIdx < 0) return LIGHT.OVERDUE;
   var diff = r.deadlineIdx - nowPrepIdx;
@@ -659,7 +686,44 @@ function onOpen() {
     .createMenu('📦 排程工具')
     .addItem('＋ 新增工單', 'showNewOrderDialog')
     .addItem('立即更新', 'menuRefresh')
+    .addItem('重新編號包裝順序', 'menuRenumber')
     .addToUi();
+}
+
+function menuRenumber() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var count = planRenumber(readOrders_(ss.getSheetByName(SHEET.ORDERS), ss.getSpreadsheetTimeZone())).length;
+  if (!count) {
+    ss.toast('目前沒有排入包裝的工單', '📦 排程工具', 5);
+    return;
+  }
+  var answer = ui.alert('重新編號包裝順序',
+    '會把 ' + count + ' 張排入包裝的工單，依目前的先後重新編成 1～' + count + '。\n' +
+    '包裝的先後順序不會改變。要繼續嗎？', ui.ButtonSet.YES_NO);
+  if (answer !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    renumber_(ss);
+  } finally {
+    lock.releaseLock();
+  }
+  ss.toast('已重新編號 ' + count + ' 張工單', '📦 排程工具', 5);
+}
+
+/** 把包裝順序改成 1、2、3…（完成或未排入的工單不動），回傳編號的張數 */
+function renumber_(ss) {
+  var sheet = ss.getSheetByName(SHEET.ORDERS);
+  var plan = planRenumber(readOrders_(sheet, ss.getSpreadsheetTimeZone()));
+  if (!plan.length) return 0;
+  var range = sheet.getRange(2, COL.SEQ, sheet.getLastRow() - 1, 1);
+  var col = range.getValues();
+  plan.forEach(function (p) { col[p.row - 2][0] = p.seq; });
+  range.setValues(col);
+  refreshAll_(ss);
+  return plan.length;
 }
 
 function menuRefresh() {
@@ -1459,7 +1523,9 @@ function buildOrdersSheet_(ss) {
   notes[COL.CUSTOMER] = '從「客戶清單」選擇。';
   notes[COL.MODEL] = '先選客戶，這裡只會列出該客戶的機型。要新增機型請到「機型清單」。';
   notes[COL.STATUS] = '改成「包裝中」時，如果「指定開始」是空的，系統會自動填入現在的時段。\n改成「完成」後就會離開包裝隊伍。';
-  notes[COL.SEQ] = '數字越小越先包裝。\n外包品要插隊時填小數，例如 1.5 會排在 1 和 2 之間，後面的工單自動順延。\n空白 = 還沒排入包裝。';
+  notes[COL.SEQ] = '數字越小越先包裝；「包裝中」的工單一律排最前面。\n' +
+    '外包品要插隊時填小數，例如 1.5 會排在 1 和 2 之間，後面的工單自動順延。\n' +
+    '空白 = 還沒排入包裝。\n號碼太大或小數太多時，可用選單「📦 排程工具 → 重新編號包裝順序」。';
   notes[COL.HOURS] = '上午、下午、加班各算 1 個時段；半個時段填 0.5。\n' +
     '空白時，系統會用「數量 ÷ 機型的每時段包裝數量」自動計算（儲存格會有「自動計算」註解）。\n直接改數字就變成手動。';
   notes[COL.FIXED_DATE] = '選填。\n・正在包裝的工單：實際開始的日期（狀態改「包裝中」會自動填）。\n・外包品：最早能包裝的日期，系統不會排在這之前。';
@@ -1610,6 +1676,7 @@ if (typeof module !== 'undefined' && module.exports) {
     rawNowKey: rawNowKey, buildTimeline: buildTimeline, startText: startText, endText: endText,
     fullSlotText: fullSlotText, computeAll: computeAll,
     autoHours: autoHours, planAutoHours: planAutoHours, nextSeq: nextSeq, safeText: safeText,
+    compareQueue: compareQueue, planRenumber: planRenumber,
     validateNewOrder: validateNewOrder, modelsByCustomer: modelsByCustomer
   };
 }

@@ -214,3 +214,23 @@ test('同一份試算表重複執行 setup 會被擋下', () => {
   const { code } = freshSetup();
   assert.throws(() => code.setup(), /已經建置過/);
 });
+
+test('重新編號：包裝順序變成 1～N，備料清單的先後不變', () => {
+  const { code, ss, sheet, COL } = freshSetup();
+  const prep = sheet('包裝備料清單');
+  const listOrder = () => { const w = []; for (let r = 3; prep.get(r, 3) !== ''; r++) w.push(prep.get(r, 3)); return w; };
+  const before = listOrder();
+
+  assert.equal(code.renumber_(ss), 7);
+  const orders = sheet('工單排程');
+  const seq = wo => orders.get(orderRow(orders, wo), COL.SEQ);
+  assert.deepEqual(['WO-0001', 'WO-0003', 'WO-0002', 'WO-0004', 'WO-0005', 'WO-0006', 'WO-0007'].map(seq),
+    [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(seq('WO-0008'), '');  // 未排入的不動
+  assert.equal(seq('WO-0000'), 0);   // 完成的不動
+  assert.deepEqual(listOrder(), before);
+
+  // 新工單排到最後 = 8
+  assert.equal(code.addWorkOrder(NEW_ORDER).ok, true);
+  assert.equal(orders.get(orderRow(orders, 'WO-1001'), COL.SEQ), 8);
+});

@@ -4,7 +4,7 @@ const { loadCode } = require('./load');
 
 const gs = loadCode().module.exports;
 const { computeAll, serialFromYmd, weekdayOf, rawNowKey, halfKey, dayLabel, LIGHT, STATUS,
-  autoHours, planAutoHours, nextSeq, safeText, isoToSerial, colLetter, validateNewOrder } = gs;
+  autoHours, planAutoHours, nextSeq, safeText, isoToSerial, colLetter, validateNewOrder, planRenumber } = gs;
 
 const T = serialFromYmd(2026, 10, 22); // 星期四
 const TIMES = { amS: 480, amE: 720, pmS: 780, pmE: 1020, otS: 1050, otE: 1230 };
@@ -258,4 +258,41 @@ test('validateNewOrder：各種錯誤', () => {
   assert.match(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1 }), /請填「包裝時段數」/);
   // 先不排入就不用時段數
   assert.equal(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1, seqMode: 'none' }), '');
+});
+
+test('包裝中的工單一律排第一，其他工單接在後面，不會重疊', () => {
+  const res = run([
+    order({ row: 2, wo: 'A', seq: 1, hours: 1 }),
+    order({ row: 3, wo: 'B', seq: 2, hours: 1 }),
+    order({ row: 4, wo: 'P', seq: 5, hours: 2, status: STATUS.PACKING, fixedSerial: T, fixedLabel: '上午' })
+  ]);
+  const by = Object.fromEntries(res.results.map(r => [r.src.wo, r]));
+  assert.equal(by.P.startText, '10/22(四) 上午');
+  assert.equal(by.P.endText, '10/22(四) 下午');
+  assert.equal(by.A.startText, '10/22(四) 加班');
+  assert.equal(by.B.startText, '10/23(五) 上午');
+  assert.deepEqual([...res.prepList.map(r => r.src.wo)], ['P', 'A', 'B']);
+});
+
+test('包裝中但沒填包裝順序，仍然排入隊伍', () => {
+  const res = run([
+    order({ row: 2, wo: 'A', seq: 1, hours: 1 }),
+    order({ row: 3, wo: 'P', seq: null, hours: 1, status: STATUS.PACKING })
+  ]);
+  const by = Object.fromEntries(res.results.map(r => [r.src.wo, r]));
+  assert.notEqual(by.P.light, LIGHT.UNQUEUED);
+  assert.equal(by.P.startText, '10/22(四) 上午');
+  assert.equal(by.A.startText, '10/22(四) 下午');
+});
+
+test('planRenumber：依隊伍先後編成 1、2、3，完成與未排入的不動', () => {
+  const plan = planRenumber([
+    { row: 2, status: STATUS.WAITING, seq: 10 },
+    { row: 3, status: STATUS.DONE, seq: 1 },
+    { row: 4, status: STATUS.WAITING, seq: 2.5 },
+    { row: 5, status: STATUS.PACKING, seq: 40 },
+    { row: 6, status: STATUS.NOT_STARTED, seq: null },
+    { row: 7, status: STATUS.TEST, seq: 2.5 }
+  ]);
+  assert.deepEqual([...plan].map(p => [p.row, p.seq]), [[5, 1], [4, 2], [7, 3], [2, 4]]);
 });
