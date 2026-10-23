@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const { loadCode } = require('./load');
 
 const gs = loadCode().module.exports;
-const { computeAll, serialFromYmd, weekdayOf, rawNowKey, halfKey, dayLabel, LIGHT, STATUS } = gs;
+const { computeAll, serialFromYmd, weekdayOf, rawNowKey, halfKey, dayLabel, LIGHT, STATUS,
+  autoHours, planAutoHours, nextSeq, safeText, isoToSerial, colLetter, validateNewOrder } = gs;
 
 const T = serialFromYmd(2026, 10, 22); // 星期四
 const TIMES = { amS: 480, amE: 720, pmS: 780, pmE: 1020, otS: 1050, otE: 1230 };
@@ -175,4 +176,86 @@ test('甘特圖：跳過週日、標出現在時段、統計現場包材', () =>
   assert.equal(g.counts[4], 1); // 加班時 A 已包完，B 在現場
   // B 的最晚備料時段（今天下午）標「備」
   assert.equal(res.gantt.cells[1][2].text, '備');
+});
+
+test('自動計算包裝時段數：以 0.5 時段無條件進位', () => {
+  assert.equal(autoHours(200, 100), 2);
+  assert.equal(autoHours(80, 60), 1.5);
+  assert.equal(autoHours(10, 100), 0.5);
+  assert.equal(autoHours(101, 100), 1.5);
+  assert.equal(autoHours(100, null), null);
+  assert.equal(autoHours(0, 100), null);
+});
+
+test('planAutoHours：只處理空白或上次自動算的，手動值不動', () => {
+  const models = [{ customer: '甲', model: 'A', capacity: 100 }];
+  const orders = [
+    { row: 2, customer: '甲', model: 'A', qty: 250, hours: null, hoursNote: '' },
+    { row: 3, customer: '甲', model: 'A', qty: 250, hours: 9, hoursNote: '' },
+    { row: 4, customer: '甲', model: 'A', qty: 300, hours: 2.5, hoursNote: '自動計算：250 台 ÷ 每時段 100 台' },
+    { row: 5, customer: '乙', model: 'A', qty: 100, hours: null, hoursNote: '' }
+  ];
+  const updates = planAutoHours(orders, models);
+  assert.deepEqual([...updates].map(u => [u.row, u.hours]), [[2, 2.5], [4, 3]]);
+  assert.equal(orders[1].hours, 9);
+  assert.equal(orders[3].hours, null); // 乙沒有 A 機型
+});
+
+test('nextSeq：未完成工單的最大順序取整數 + 1', () => {
+  assert.equal(nextSeq([]), 1);
+  assert.equal(nextSeq([{ status: '待包裝', seq: 3 }, { status: '待包裝', seq: 4.5 }, { status: '完成', seq: 9 }]), 5);
+  assert.equal(nextSeq([{ status: '待包裝', seq: null }]), 1);
+});
+
+test('safeText、isoToSerial、colLetter', () => {
+  assert.equal(safeText('=1+1'), "'=1+1");
+  assert.equal(safeText('-5'), "'-5");
+  assert.equal(safeText('WO-1'), 'WO-1');
+  assert.equal(isoToSerial('2026-10-22'), T);
+  assert.equal(isoToSerial('2026-02-30'), null);
+  assert.equal(isoToSerial('10/22'), null);
+  assert.equal(colLetter(12), 'L');
+  assert.equal(colLetter(27), 'AA');
+});
+
+test('validateNewOrder：正確資料產生一列', () => {
+  const ctx = {
+    customers: ['甲'], models: [{ customer: '甲', model: 'A', capacity: 100 }],
+    statuses: ['未開工', '完成'], methods: ['自製', '外包'], existingWos: ['WO-1'], nextSeq: 4
+  };
+  const v = validateNewOrder({ customer: '甲', model: 'A', wo: ' WO-2 ', qty: '150', ship: '2026-10-30',
+    method: '外包', status: '', seqMode: 'last', hoursAuto: true, note: '第一行\n第二行' }, ctx);
+  assert.deepEqual([...v.errors], []);
+  assert.equal(v.wo, 'WO-2');
+  const row = v.row;
+  assert.equal(row.length, 16);
+  assert.equal(row[1], 'WO-2');
+  assert.equal(row[4], 150);
+  assert.equal(row[5], serialFromYmd(2026, 10, 30));
+  assert.equal(row[7], '未開工');
+  assert.equal(row[10], 4);
+  assert.equal(row[11], 1.5);
+  assert.equal(row[15], '第一行 第二行');
+  assert.match(v.hoursNote, /^自動計算/);
+});
+
+test('validateNewOrder：各種錯誤', () => {
+  const ctx = {
+    customers: ['甲'], models: [{ customer: '甲', model: 'A', capacity: null }],
+    statuses: ['未開工'], methods: ['自製'], existingWos: ['WO-1'], nextSeq: 1
+  };
+  const errs = d => [...validateNewOrder(d, ctx).errors].join('｜');
+  assert.match(errs({}), /客戶.*機型.*工單編號.*數量/);
+  assert.match(errs({ customer: '乙', model: 'A', wo: 'x', qty: 1 }), /不在客戶清單/);
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'wo-1', qty: 1 }), /已經存在/);
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1.5 }), /整數/);
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'x'.repeat(31), qty: 1 }), /最多 30/);
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1, ship: '2026-13-01' }), /出貨日/);
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1, status: '亂填' }), /目前狀態/);
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1, seqMode: 'custom', seq: '' }), /指定順序/);
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1, hoursAuto: false, hours: '0.3' }), /0\.5 為單位/);
+  // 機型沒有包裝數量又要排入：要求填時段數
+  assert.match(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1 }), /請填「包裝時段數」/);
+  // 先不排入就不用時段數
+  assert.equal(errs({ customer: '甲', model: 'A', wo: 'x', qty: 1, seqMode: 'none' }), '');
 });

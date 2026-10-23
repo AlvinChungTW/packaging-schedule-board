@@ -72,6 +72,24 @@ class MockRange {
     for (let r = 0; r < this.numRows; r++) for (let c = 0; c < this.numCols; c++) this.sheet.set(this.row + r, this.col + c, false);
     return proxyOf(this);
   }
+  getNotes() {
+    const out = [];
+    for (let r = 0; r < this.numRows; r++) {
+      const line = [];
+      for (let c = 0; c < this.numCols; c++) line.push(this.sheet.notes.get((this.row + r) + ',' + (this.col + c)) || '');
+      out.push(line);
+    }
+    return out;
+  }
+  setNote(note) {
+    for (let r = 0; r < this.numRows; r++) for (let c = 0; c < this.numCols; c++) {
+      const key = (this.row + r) + ',' + (this.col + c);
+      if (note) this.sheet.notes.set(key, note); else this.sheet.notes.delete(key);
+    }
+    return proxyOf(this);
+  }
+  clearNote() { return this.setNote(''); }
+  setDataValidations(a) { return this.checkGrid(a, 'setDataValidations'); }
   setBackgrounds(a) { return this.checkGrid(a, 'setBackgrounds'); }
   setFontColors(a) { return this.checkGrid(a, 'setFontColors'); }
   setFontWeights(a) { return this.checkGrid(a, 'setFontWeights'); }
@@ -81,7 +99,7 @@ class MockRange {
 
 class MockSheet {
   constructor(name) {
-    Object.assign(this, { name, maxRows: 1000, maxCols: 26, cells: new Map(), merges: [] });
+    Object.assign(this, { name, maxRows: 1000, maxCols: 26, cells: new Map(), notes: new Map(), merges: [], images: [] });
   }
   get(r, c) { const v = this.cells.get(r + ',' + c); return v === undefined ? '' : v; }
   set(r, c, v) { if (v === '' || v == null) this.cells.delete(r + ',' + c); else this.cells.set(r + ',' + c, v); }
@@ -104,6 +122,7 @@ class MockSheet {
   insertRowsAfter(after, n) { this.maxRows += n; return proxyOf(this); }
   insertColumnsAfter(after, n) { this.maxCols += n; return proxyOf(this); }
   protect() { return chain(); }
+  insertImage(blob, col, row) { this.images.push({ col, row }); return chain(); }
 }
 
 class MockSpreadsheet {
@@ -151,7 +170,8 @@ function createGas() {
       getUi: chain,
       BorderStyle: { SOLID_MEDIUM: 'SOLID_MEDIUM' }
     },
-    Utilities: { formatDate },
+    Utilities: { formatDate, newBlob: chain, base64Decode: (s) => Buffer.from(s, 'base64') },
+    HtmlService: { createHtmlOutput: chain },
     ScriptApp: {
       getProjectTriggers: () => triggers,
       deleteTrigger: () => {},
